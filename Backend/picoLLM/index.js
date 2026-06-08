@@ -1,26 +1,23 @@
 /**
- * Simple offline AI stub — replace with real PicoLLM later.
+ * Ollama LLM — calls local TinyLlama via Ollama API.
  */
-async function getResponse(text) {
-  const q = (text || "").toLowerCase().trim();
+async function getResponse(prompt) {
+  const res = await fetch("http://localhost:11434/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "tinyllama",
+      prompt: prompt,
+      stream: false,
+    }),
+  });
 
-  if (!q) {
-    return "I didn't catch a question. Please try again.";
+  if (!res.ok) {
+    throw new Error(`Ollama returned status ${res.status}`);
   }
 
-  if (q.includes("capital of france")) {
-    return "Paris.";
-  }
-
-  if (q.includes("hello") || q.includes("hi")) {
-    return "Hello! How can I help you?";
-  }
-
-  if (q.includes("your name") || q.includes("who are you")) {
-    return "I am a simple offline AI assistant built with Techelix.";
-  }
-
-  return "I am a simple offline AI and I don't know that yet.";
+  const data = await res.json();
+  return data.response;
 }
 
 module.exports = { getResponse };

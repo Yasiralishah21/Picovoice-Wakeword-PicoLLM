@@ -15,6 +15,12 @@ const LANGUAGES = [
   { value: "de", label: "German" },
 ];
 
+function speak(text) {
+  const speech = new SpeechSynthesisUtterance(text);
+  speech.lang = "en-US";
+  window.speechSynthesis.speak(speech);
+}
+
 const WAKE_EXAMPLES = ["siri", "computer", "Moto", "Techelix"];
 
 function speakAsync(text, lang = "en-US") {
@@ -501,6 +507,7 @@ export default function HeroLiveKit() {
   const [statsActive, setStatsActive] = useState(false);
   const [aiResponse, setAiResponse]   = useState("");
   const [heardText, setHeardText]     = useState("");
+  const [chatInput, setChatInput]     = useState("");
 
   const resetTrainState = useCallback(() => {
     window.speechSynthesis?.cancel();
@@ -514,6 +521,7 @@ export default function HeroLiveKit() {
     setTrainError("");
     setAiResponse("");
     setHeardText("");
+    setChatInput("");
     if (trainTimer.current) {
       clearInterval(trainTimer.current);
       trainTimer.current = null;
@@ -535,21 +543,22 @@ export default function HeroLiveKit() {
   }, []);
 
   const sendQuery = useCallback(async (text) => {
-    const res = await fetch(`${API_URL}/ask-ai`, {
+    console.log("Sending query...");
+    const res = await fetch(`${API_URL}/voice-status`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ audio: text }),
     });
 
     const data = await res.json();
 
-    if (!data.success) {
+    if (!data.response) {
       throw new Error(data.error || "AI request failed");
     }
 
-    console.log("AI RESPONSE:", data.response);
+    console.log("Response received...", data.response);
     setAiResponse(data.response);
-    await speakAsync(data.response);
+    speak(data.response);
     return data.response;
   }, []);
 
@@ -700,11 +709,11 @@ export default function HeroLiveKit() {
 
     setTrainPhase("detected");
     await speakAsync("Yes!");
-    setTrainPhase("question_prompt");
-    await speakAsync("Do you have any question?");
+    setTrainPhase("choice_mode");
+    await speakAsync("How would you like to ask? Choose voice or chat.");
   }, [trainPhase, wakeWord, language]);
 
-  const handleQuestionYes = useCallback(async () => {
+  const handleVoiceOption = useCallback(async () => {
     setTrainError("");
     setHeardText("");
     setTrainPhase("listening_question");
@@ -720,8 +729,8 @@ export default function HeroLiveKit() {
     );
 
     if (!question) {
-      setTrainError("I didn't hear a question. Try again.");
-      setTrainPhase("question_prompt");
+      setTrainError("I didn't hear a question. Try voice again or use chat.");
+      setTrainPhase("choice_mode");
       return;
     }
 
@@ -733,15 +742,34 @@ export default function HeroLiveKit() {
       setTrainPhase("answered");
     } catch (err) {
       console.error("Pipeline failed:", err);
-      setTrainError("Could not get an AI response. Is the backend running on port 5000?");
-      setTrainPhase("question_prompt");
+      setTrainError("Could not get an AI response. Is the backend and Ollama running?");
+      setTrainPhase("choice_mode");
     }
   }, [language, transcribeSpeech, sendQuery]);
 
-  const handleQuestionNo = useCallback(async () => {
-    await speakAsync("Okay. Let me know if you need anything.");
-    setTrainPhase("finished");
+  const handleChatOption = useCallback(() => {
+    setTrainError("");
+    setHeardText("");
+    setChatInput("");
+    setTrainPhase("chat_input");
   }, []);
+
+  const handleChatSubmit = useCallback(async () => {
+    const question = chatInput.trim();
+    if (!question) return;
+
+    setTrainError("");
+    setTrainPhase("answering");
+
+    try {
+      await sendQuery(question);
+      setTrainPhase("answered");
+    } catch (err) {
+      console.error("Chat pipeline failed:", err);
+      setTrainError("Could not get an AI response. Is the backend and Ollama running?");
+      setTrainPhase("chat_input");
+    }
+  }, [chatInput, sendQuery]);
 
   const handleTrainAnother = useCallback(() => {
     if (trainTimer.current) {
@@ -754,6 +782,7 @@ export default function HeroLiveKit() {
     setFinalTime(0);
     setTrainError("");
     setAiResponse("");
+    setChatInput("");
   }, []);
 
   useEffect(() => () => {
@@ -935,17 +964,57 @@ export default function HeroLiveKit() {
                   </div>
                 )}
 
-                {trainPhase === "question_prompt" && (
+                {trainPhase === "choice_mode" && (
                   <div className="lk-train-question">
-                    <p className="lk-train-record-label">Do you have any question?</p>
+                    <p className="lk-train-record-label">How would you like to ask?</p>
                     <div className="lk-train-yn">
-                      <button type="button" className="lk-train-btn lk-train-btn--yes" onClick={handleQuestionYes}>
-                        Yes
+                      <button type="button" className="lk-train-btn lk-train-btn--voice" onClick={handleVoiceOption}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                          stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                          <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>
+                        </svg>
+                        Voice
                       </button>
-                      <button type="button" className="lk-train-btn lk-train-btn--no" onClick={handleQuestionNo}>
-                        No
+                      <button type="button" className="lk-train-btn lk-train-btn--chat" onClick={handleChatOption}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                          stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                        </svg>
+                        Chat
                       </button>
                     </div>
+                    {trainError && (
+                      <p className="lk-train-error" role="alert">{trainError}</p>
+                    )}
+                  </div>
+                )}
+
+                {trainPhase === "chat_input" && (
+                  <div className="lk-train-chat">
+                    <p className="lk-train-record-label">Ask your question</p>
+                    <textarea
+                      className="lk-train-chat-input"
+                      placeholder="Type your question here..."
+                      value={chatInput}
+                      onChange={e => setChatInput(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), handleChatSubmit())}
+                      rows={3}
+                    />
+                    <button
+                      type="button"
+                      className="lk-train-btn"
+                      disabled={!chatInput.trim()}
+                      onClick={handleChatSubmit}
+                    >
+                      Ask AI
+                    </button>
+                    {trainError && (
+                      <p className="lk-train-error" role="alert">{trainError}</p>
+                    )}
+                    <button type="button" className="lk-train-back" onClick={() => setTrainPhase("choice_mode")}>
+                      Back
+                    </button>
                   </div>
                 )}
 
@@ -974,7 +1043,7 @@ export default function HeroLiveKit() {
                 {trainPhase === "answered" && (
                   <div className="lk-train-done" role="status">
                     <p className="lk-train-done-text">{aiResponse}</p>
-                    <button type="button" className="lk-train-back" onClick={handleTrainAnother}>
+                    <button type="button" className="lk-train-back" onClick={() => { setChatInput(""); setTrainPhase("choice_mode"); }}>
                       Ask another
                     </button>
                   </div>
@@ -1683,15 +1752,44 @@ export default function HeroLiveKit() {
           width: 100%;
           max-width: 16rem;
         }
-        .lk-train-btn--yes,
-        .lk-train-btn--no {
+        .lk-train-btn--voice,
+        .lk-train-btn--chat {
           flex: 1;
           min-height: 2.5rem;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 0.4rem;
         }
-        .lk-train-btn--no {
+        .lk-train-btn--chat {
           background: rgba(255, 255, 255, 0.06);
           border: 1px solid rgba(255, 255, 255, 0.18);
           box-shadow: none;
+        }
+        .lk-train-chat {
+          display: flex;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 0.75rem;
+          width: 100%;
+        }
+        .lk-train-chat-input {
+          width: 100%;
+          min-height: 5rem;
+          padding: 0.75rem 0.875rem;
+          border-radius: 0.5rem;
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          background: rgba(255, 255, 255, 0.04);
+          color: #fff;
+          font-size: clamp(0.8125rem, 2vw, 0.9375rem);
+          font-family: inherit;
+          resize: vertical;
+          outline: none;
+        }
+        .lk-train-chat-input::placeholder { color: rgba(144, 149, 168, 0.65); }
+        .lk-train-chat-input:focus {
+          border-color: rgba(91, 107, 248, 0.55);
+          box-shadow: 0 0 0 3px rgba(91, 107, 248, 0.15);
         }
 
         @media (prefers-reduced-motion: reduce){
