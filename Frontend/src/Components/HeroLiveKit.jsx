@@ -17,37 +17,210 @@ const LANGUAGES = [
 
 const WAKE_EXAMPLES = ["siri", "computer", "Moto", "Techelix"];
 
-function listenForWakeWord(language, fallback) {
+function speakAsync(text, lang = "en-US") {
   return new Promise((resolve) => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!text || !window.speechSynthesis) {
+      resolve();
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = lang;
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    utterance.onend = () => resolve();
+    utterance.onerror = () => resolve();
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
+function normalizeSpeech(text) {
+  return (text || "").toLowerCase().replace(/[^\w\s']/g, "").trim();
+}
+
+function matchesWakeWord(transcript, targetWord) {
+  const heard = normalizeSpeech(transcript);
+  const target = normalizeSpeech(targetWord);
+  if (!target || !heard) return false;
+  if (heard.includes(target)) return true;
+
+  const heardWords = heard.split(/\s+/);
+  const targetWords = target.split(/\s+/);
+
+  if (targetWords.length === 1) {
+    return heardWords.some(
+      (w) => w === target || w.startsWith(target) || target.startsWith(w)
+    );
+  }
+
+  return targetWords.every((tw) => heardWords.some((w) => w.includes(tw) || tw.includes(w)));
+}
+
+function releaseMicStream(streamRef) {
+  streamRef?.current?.getTracks().forEach((t) => t.stop());
+  if (streamRef) streamRef.current = null;
+}
+
+function getSpeechRecognition() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function listenUntilWakeWord(language, targetWord, recRef, onPartial) {
+  return new Promise((resolve) => {
+    const SpeechRecognition = getSpeechRecognition();
+
     if (!SpeechRecognition) {
-      resolve(fallback);
+      setTimeout(() => resolve(targetWord), 1500);
       return;
     }
 
+    window.speechSynthesis?.cancel();
+
     const rec = new SpeechRecognition();
     rec.lang = language === "en" ? "en-US" : language;
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 3;
+
+    if (recRef) recRef.current = rec;
 
     let settled = false;
+    let restartTimer = null;
+
     const finish = (value) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      resolve(value || fallback);
+      clearTimeout(restartTimer);
+      clearTimeout(maxTimer);
+      try { rec.stop(); } catch { /* ignore */ }
+      if (recRef) recRef.current = null;
+      resolve(value);
     };
 
-    const timer = setTimeout(() => {
+    const maxTimer = setTimeout(() => {
+      console.warn("Wake word listen timed out");
+      finish(null);
+    }, 25000);
+
+    const restart = () => {
+      if (settled) return;
+      clearTimeout(restartTimer);
+      restartTimer = setTimeout(() => {
+        try { rec.start(); } catch (err) {
+          console.error("Speech recognition restart failed:", err);
+          finish(null);
+        }
+      }, 250);
+    };
+
+    rec.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const transcript = e.results[i][0].transcript;
+        onPartial?.(transcript);
+
+        if (matchesWakeWord(transcript, targetWord)) {
+          console.log("Wake word matched:", transcript);
+          finish(targetWord);
+          return;
+        }
+      }
+    };
+
+    rec.onerror = (e) => {
+      console.warn("Speech recognition error:", e.error);
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        finish(null);
+        return;
+      }
+      if (e.error === "no-speech" || e.error === "aborted" || e.error === "network") {
+        restart();
+      }
+    };
+
+    rec.onend = () => {
+      if (!settled) restart();
+    };
+
+    try {
+      rec.start();
+    } catch (err) {
+      console.error("Speech recognition start failed:", err);
+      finish(null);
+    }
+  });
+}
+
+function listenForQuestion(language, recRef, onPartial) {
+  return new Promise((resolve) => {
+    const SpeechRecognition = getSpeechRecognition();
+
+    if (!SpeechRecognition) {
+      const fallback = window.prompt("Speech recognition unavailable. Type your question:") || "";
+      resolve(fallback.trim());
+      return;
+    }
+
+    window.speechSynthesis?.cancel();
+
+    const rec = new SpeechRecognition();
+    rec.lang = language === "en" ? "en-US" : language;
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 3;
+
+    if (recRef) recRef.current = rec;
+
+    let settled = false;
+    let restartTimer = null;
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(restartTimer);
+      clearTimeout(maxTimer);
       try { rec.stop(); } catch { /* ignore */ }
-      finish(fallback);
-    }, 4500);
+      if (recRef) recRef.current = null;
+      resolve(value);
+    };
 
-    rec.onresult = (e) => finish(e.results?.[0]?.[0]?.transcript?.trim() || fallback);
-    rec.onerror = () => finish(fallback);
-    rec.onend = () => { if (!settled) finish(fallback); };
+    const maxTimer = setTimeout(() => {
+      try { rec.stop(); } catch { /* ignore */ }
+      finish("");
+    }, 12000);
 
-    try { rec.start(); } catch { finish(fallback); }
+    const restart = () => {
+      if (settled) return;
+      clearTimeout(restartTimer);
+      restartTimer = setTimeout(() => {
+        try { rec.start(); } catch { finish(""); }
+      }, 250);
+    };
+
+    rec.onresult = (e) => {
+      const last = e.results[e.results.length - 1];
+      const transcript = last[0].transcript.trim();
+      onPartial?.(transcript);
+
+      if (last.isFinal && transcript) {
+        finish(transcript);
+      }
+    };
+
+    rec.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        finish("");
+        return;
+      }
+      if (e.error === "no-speech" || e.error === "aborted") {
+        restart();
+      }
+    };
+
+    rec.onend = () => {
+      if (!settled) restart();
+    };
+
+    try { rec.start(); } catch { finish(""); }
   });
 }
 
@@ -323,20 +496,61 @@ export default function HeroLiveKit() {
   const streamRef   = useRef(null);
   const tipTimer    = useRef(null);
   const trainTimer  = useRef(null);
+  const recRef      = useRef(null);
   const statsRef    = useRef(null);
   const [statsActive, setStatsActive] = useState(false);
+  const [aiResponse, setAiResponse]   = useState("");
+  const [heardText, setHeardText]     = useState("");
 
   const resetTrainState = useCallback(() => {
+    window.speechSynthesis?.cancel();
+    try { recRef.current?.stop(); } catch { /* ignore */ }
+    recRef.current = null;
     setWakeWord("");
     setLanguage("en");
     setTrainPhase("form");
     setTrainTime(0);
     setFinalTime(0);
     setTrainError("");
+    setAiResponse("");
+    setHeardText("");
     if (trainTimer.current) {
       clearInterval(trainTimer.current);
       trainTimer.current = null;
     }
+  }, []);
+
+  const transcribeSpeech = useCallback(async (spokenText) => {
+    const res = await fetch(`${API_URL}/transcribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: spokenText }),
+    });
+    const data = await res.json();
+    if (!data.success) {
+      throw new Error(data.error || "Transcription failed");
+    }
+    console.log("WHISPER TRANSCRIPT:", data.text);
+    return data.text;
+  }, []);
+
+  const sendQuery = useCallback(async (text) => {
+    const res = await fetch(`${API_URL}/ask-ai`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+
+    const data = await res.json();
+
+    if (!data.success) {
+      throw new Error(data.error || "AI request failed");
+    }
+
+    console.log("AI RESPONSE:", data.response);
+    setAiResponse(data.response);
+    await speakAsync(data.response);
+    return data.response;
   }, []);
 
   useEffect(() => {
@@ -364,37 +578,42 @@ export default function HeroLiveKit() {
 
   const handleBoxClick = useCallback(async () => {
     if (talking) return;
+
     setMicError(false);
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-      setTalking(true); setMicOn(true); setTooltipVis(false);
+
+      setTalking(true);
+      setMicOn(true);
+      setTooltipVis(false);
+
       await fetch(`${API_URL}/voice-status`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          recording: true,
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recording: true }),
       });
-    } catch { setMicError(true); }
+    } catch (err) {
+      console.error(err);
+      setMicError(true);
+    }
   }, [talking]);
 
   const handleCancel = useCallback(() => {
     fetch(`${API_URL}/voice-status`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        recording: false,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recording: false }),
     });
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
+    window.speechSynthesis?.cancel();
+    try { recRef.current?.stop(); } catch { /* ignore */ }
+    recRef.current = null;
+    releaseMicStream(streamRef);
     resetTrainState();
-    setTalking(false); setMicOn(true); setMicError(false);
+    setTalking(false);
+    setMicOn(true);
+    setMicError(false);
   }, [resetTrainState]);
 
   const toggleMic = useCallback(() => {
@@ -402,32 +621,76 @@ export default function HeroLiveKit() {
     if (track) { track.enabled = !track.enabled; setMicOn(v => !v); }
   }, []);
 
-  const handleTrain = useCallback(() => {
+  const handleTrain = useCallback(async () => {
     if (!wakeWord.trim()) return;
     setTrainError("");
+    const trimmed = wakeWord.trim();
+
+    setTrainPhase("training");
+    setTrainTime(0);
+    const start = performance.now();
+    const targetDuration = Math.random() * 5;
+
+    await new Promise((resolve) => {
+      trainTimer.current = setInterval(() => {
+        const elapsed = (performance.now() - start) / 1000;
+        setTrainTime(Math.min(elapsed, targetDuration));
+        if (elapsed >= targetDuration) {
+          clearInterval(trainTimer.current);
+          trainTimer.current = null;
+          setFinalTime(targetDuration);
+          resolve();
+        }
+      }, 40);
+    });
+
+    setTrainPhase("done");
+    await speakAsync(`Wake word trained in ${targetDuration.toFixed(1)} seconds`);
+
     setTrainPhase("record");
+    await speakAsync(`Tap the mic and say ${trimmed}`);
   }, [wakeWord]);
+
+  const stopListening = useCallback(() => {
+    window.speechSynthesis?.cancel();
+    try { recRef.current?.stop(); } catch { /* ignore */ }
+    recRef.current = null;
+    releaseMicStream(streamRef);
+    setHeardText("");
+    setTrainPhase("record");
+  }, []);
 
   const handleRecordMic = useCallback(async () => {
     if (trainPhase !== "record") return;
+
     setTrainError("");
+    setHeardText("");
     setTrainPhase("listening");
-    setTrainTime(0);
+
+    releaseMicStream(streamRef);
+    window.speechSynthesis?.cancel();
 
     const trimmed = wakeWord.trim();
-    const detected = await listenForWakeWord(language, trimmed);
-    setTrainPhase("training");
-    const start = performance.now();
-    const targetDuration = 4 + Math.random() * 1.2;
+    await speakAsync(`Listening for ${trimmed}`);
+
+    const detected = await listenUntilWakeWord(
+      language,
+      trimmed,
+      recRef,
+      (partial) => setHeardText(partial)
+    );
+
+    if (!detected) {
+      setTrainError("Couldn't hear your wake word. Tap the mic and try again. (Use Chrome/Edge)");
+      setTrainPhase("record");
+      return;
+    }
 
     try {
       await fetch(`${API_URL}/voice-status`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          wakeword: detected,
-          language,
-        }),
+        body: JSON.stringify({ wakeword: detected, language }),
       });
     } catch {
       setTrainError("Could not reach the server. Please try again.");
@@ -435,19 +698,50 @@ export default function HeroLiveKit() {
       return;
     }
 
-    if (detected !== trimmed) setWakeWord(detected);
-
-    trainTimer.current = setInterval(() => {
-      const elapsed = (performance.now() - start) / 1000;
-      setTrainTime(Math.min(elapsed, targetDuration));
-      if (elapsed >= targetDuration) {
-        clearInterval(trainTimer.current);
-        trainTimer.current = null;
-        setFinalTime(targetDuration);
-        setTrainPhase("done");
-      }
-    }, 40);
+    setTrainPhase("detected");
+    await speakAsync("Yes!");
+    setTrainPhase("question_prompt");
+    await speakAsync("Do you have any question?");
   }, [trainPhase, wakeWord, language]);
+
+  const handleQuestionYes = useCallback(async () => {
+    setTrainError("");
+    setHeardText("");
+    setTrainPhase("listening_question");
+    await speakAsync("I'm listening. Ask your question.");
+
+    releaseMicStream(streamRef);
+    window.speechSynthesis?.cancel();
+
+    const question = await listenForQuestion(
+      language,
+      recRef,
+      (partial) => setHeardText(partial)
+    );
+
+    if (!question) {
+      setTrainError("I didn't hear a question. Try again.");
+      setTrainPhase("question_prompt");
+      return;
+    }
+
+    setTrainPhase("answering");
+
+    try {
+      const text = await transcribeSpeech(question);
+      await sendQuery(text);
+      setTrainPhase("answered");
+    } catch (err) {
+      console.error("Pipeline failed:", err);
+      setTrainError("Could not get an AI response. Is the backend running on port 5000?");
+      setTrainPhase("question_prompt");
+    }
+  }, [language, transcribeSpeech, sendQuery]);
+
+  const handleQuestionNo = useCallback(async () => {
+    await speakAsync("Okay. Let me know if you need anything.");
+    setTrainPhase("finished");
+  }, []);
 
   const handleTrainAnother = useCallback(() => {
     if (trainTimer.current) {
@@ -459,6 +753,7 @@ export default function HeroLiveKit() {
     setTrainTime(0);
     setFinalTime(0);
     setTrainError("");
+    setAiResponse("");
   }, []);
 
   useEffect(() => () => {
@@ -618,6 +913,48 @@ export default function HeroLiveKit() {
                     <p className="lk-train-record-label">
                       Listening for &ldquo;{wakeWord.trim()}&rdquo;&hellip;
                     </p>
+                    {heardText && (
+                      <p className="lk-train-heard">Heard: &ldquo;{heardText}&rdquo;</p>
+                    )}
+                    <div className="lk-train-mic-btn lk-train-mic-btn--active" aria-hidden="true">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>
+                      </svg>
+                    </div>
+                    <button type="button" className="lk-train-back" onClick={stopListening}>
+                      Cancel listening
+                    </button>
+                  </div>
+                )}
+
+                {trainPhase === "detected" && (
+                  <div className="lk-train-done" role="status">
+                    <p className="lk-train-done-text lk-train-yes">YES!</p>
+                  </div>
+                )}
+
+                {trainPhase === "question_prompt" && (
+                  <div className="lk-train-question">
+                    <p className="lk-train-record-label">Do you have any question?</p>
+                    <div className="lk-train-yn">
+                      <button type="button" className="lk-train-btn lk-train-btn--yes" onClick={handleQuestionYes}>
+                        Yes
+                      </button>
+                      <button type="button" className="lk-train-btn lk-train-btn--no" onClick={handleQuestionNo}>
+                        No
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {trainPhase === "listening_question" && (
+                  <div className="lk-train-record" role="status" aria-live="polite">
+                    <p className="lk-train-record-label">Listening for your question&hellip;</p>
+                    {heardText && (
+                      <p className="lk-train-heard">Heard: &ldquo;{heardText}&rdquo;</p>
+                    )}
                     <div className="lk-train-mic-btn lk-train-mic-btn--active" aria-hidden="true">
                       <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
                         stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -628,10 +965,25 @@ export default function HeroLiveKit() {
                   </div>
                 )}
 
+                {trainPhase === "answering" && (
+                  <div className="lk-train-progress" role="status" aria-live="polite">
+                    <p className="lk-train-progress-text">Thinking&hellip;</p>
+                  </div>
+                )}
+
+                {trainPhase === "answered" && (
+                  <div className="lk-train-done" role="status">
+                    <p className="lk-train-done-text">{aiResponse}</p>
+                    <button type="button" className="lk-train-back" onClick={handleTrainAnother}>
+                      Ask another
+                    </button>
+                  </div>
+                )}
+
                 {trainPhase === "training" && (
                   <div className="lk-train-progress" role="status" aria-live="polite">
                     <p className="lk-train-progress-text">
-                      Training the model&hellip;{" "}
+                      Model is training &ldquo;{wakeWord.trim()}&rdquo;&hellip;{" "}
                       <span className="lk-train-progress-time">{trainTime.toFixed(2)}s</span>
                     </p>
                     <div className="lk-train-progress-bar" aria-hidden="true">
@@ -650,6 +1002,12 @@ export default function HeroLiveKit() {
                       <br />
                       <span className="lk-train-done-time">in {finalTime.toFixed(2)}s</span>
                     </p>
+                  </div>
+                )}
+
+                {trainPhase === "finished" && (
+                  <div className="lk-train-done" role="status">
+                    <p className="lk-train-done-text">All set! Come back anytime.</p>
                     <button type="button" className="lk-train-back" onClick={handleTrainAnother}>
                       Train another
                     </button>
@@ -1189,6 +1547,15 @@ export default function HeroLiveKit() {
           line-height: 1.5;
           max-width: 18rem;
         }
+        .lk-train-heard {
+          margin: 0;
+          font-size: clamp(0.75rem, 1.8vw, 0.875rem);
+          color: ${CYAN};
+          text-align: center;
+          line-height: 1.4;
+          max-width: 20rem;
+          font-style: italic;
+        }
         .lk-train-mic-btn {
           display: flex;
           align-items: center;
@@ -1297,6 +1664,34 @@ export default function HeroLiveKit() {
         .lk-train-done-time {
           color: ${CYAN};
           font-weight: 600;
+        }
+        .lk-train-yes {
+          font-size: clamp(1.5rem, 5vw, 2rem);
+          font-weight: 800;
+          color: ${CYAN};
+        }
+        .lk-train-question {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 0.875rem;
+          width: 100%;
+        }
+        .lk-train-yn {
+          display: flex;
+          gap: 0.75rem;
+          width: 100%;
+          max-width: 16rem;
+        }
+        .lk-train-btn--yes,
+        .lk-train-btn--no {
+          flex: 1;
+          min-height: 2.5rem;
+        }
+        .lk-train-btn--no {
+          background: rgba(255, 255, 255, 0.06);
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          box-shadow: none;
         }
 
         @media (prefers-reduced-motion: reduce){
